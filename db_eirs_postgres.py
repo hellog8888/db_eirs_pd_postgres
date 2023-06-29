@@ -1,7 +1,9 @@
 import psycopg2.extras
 import datetime
 import glob
-import openpyxl
+import pandas as pd
+import datetime
+import io
 import warnings
 
 warnings.simplefilter("ignore")
@@ -53,70 +55,74 @@ def measure_time(func):
     return wrapper
 
 
+def convert_exel_to_csv(file):
+    cur_time = datetime.datetime.now()
+    time_now = f'{cur_time.day}-{cur_time.month:02}-{cur_time.year}_{cur_time.hour:02}_{cur_time.minute:02}_{cur_time.second:02}'
+
+    file_all = pd.read_excel(file).loc[:,['Наименование РЭС', 'Адрес', '№ вида ЕТС', 'Владелец', 'Широта', 'Долгота', 'Частоты', 'Дополнительные параметры', 'Классы излучения', 'Серия последнего действующего РЗ/СоР', 'Номер последнего действующего РЗ/СоР']]
+
+    file_all['Наименование РЭС'] = file_all['Наименование РЭС'].str.strip()
+    file_all['Адрес'] = file_all['Адрес'].str.strip().str.replace('., ', ', ').str.replace('\"', '')
+    file_all['№ вида ЕТС'] = [dict_ETC[x.strip()] for x in file_all['№ вида ЕТС']]
+    file_all['Владелец'] = [dict_for_operator[x.strip()] for x in file_all['Владелец']]
+    file_all['Широта'] = file_all['Широта'].str.strip()
+    file_all['Долгота'] = file_all['Долгота'].str.strip()
+    file_all['Частоты'] = file_all['Частоты'].str.strip()
+    file_all['Дополнительные параметры'] = file_all['Дополнительные параметры'].str.strip()
+    file_all['Классы излучения'] = file_all['Классы излучения'].str.strip()
+    file_all['Серия последнего действующего РЗ/СоР'] = file_all['Серия последнего действующего РЗ/СоР'].str.strip()
+
+    file_all.to_csv(f'source_folder\\{time_now}.csv', sep='^', index=False)
+
 @measure_time
-def convert_to_postgres(file_open):
+def write_to_postgres(file_csv):
     hostname = 'localhost'
     database = 'eirs'
     username = 'postgres'
-    pwd = '1234'
+    password = '1234'
     port_id = 5432
-    conn = None
+    connection = None
 
     try:
-        with psycopg2.connect(
-                host=hostname,
-                dbname=database,
-                user=username,
-                password=pwd,
-                port=port_id
-        ) as conn:
+        with psycopg2.connect(host=hostname, dbname=database, user=username, password=password, port=port_id) as connection:
+            with connection.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
 
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-
-                # удалить таблицу (не считать ошибкой)
                 cur.execute('DROP TABLE IF EXISTS cellular')
-
-                create_script = """ CREATE TABLE IF NOT EXISTS cellular (
-                                        РЭС                       varchar(51),
+                create_table = """ CREATE TABLE IF NOT EXISTS cellular (
+                                        РЭС                       text,
                                         Адрес                     varchar(230),
-                                        ТИП_РЭС                   varchar(5),
+                                        ТИП_РЭС                   text,
                                         Владелец                  varchar(11),
                                         Широта                    varchar(9),
                                         Долгота                   varchar(9),
                                         Частоты                   varchar(756),
-                                        Дополнительные_параметры  varchar(590),
+                                        Дополнительные_параметры  text,
                                         Классы_излучения          varchar(53),
-                                        Серия_Номер_РЗ_СоР        varchar(13))
+                                        Серия_Номер_РЗ_СоР        text)
                                 """
+                cur.execute(create_table)
 
-                cur.execute(create_script)
-
-                file_to_read = openpyxl.load_workbook(file_open, data_only=True)
-                sheet = file_to_read['SQL Results']
-
-                for row in range(2, sheet.max_row + 1):
+                with io.open(file_csv, mode="r", encoding='utf-8') as csv_file:
                     data = []
+                    for row in csv_file.readlines():
+                        data = row.strip().split('^')
 
-                    for col in range(1, sheet.max_column + 1):
-                        value = sheet.cell(row, col).value
-                        data.append(value)
+                        cur.execute("INSERT INTO cellular (РЭС, Адрес, ТИП_РЭС, Владелец, Широта, Долгота, Частоты, Дополнительные_параметры, Классы_излучения, Серия_Номер_РЗ_СоР) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                         (data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], f'{data[9]} {data[10]}'))
 
-                    cur.execute(
-                         "INSERT INTO cellular (РЭС, Адрес, ТИП_РЭС, Владелец, Широта, Долгота, Частоты, Дополнительные_параметры, Классы_излучения, Серия_Номер_РЗ_СоР) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                         (str(data[1]), str(data[2]), str(dict_ETC[data[3]]), str(dict_for_operator[data[6]]),
-                          str(data[7]), str(data[8]), str(data[10]), str(data[11]), str(data[17]), f'{data[18]} {data[19]}'))
-
-                    #print(data[1], data[2], dict_ETC[data[3]], dict_for_operator[data[6]], data[7], data[8], data[10], data[11], data[17], f'{data[18]} {data[19]}')
                     data.clear()
 
-                conn.commit()
+                connection.commit()
 
     except Exception as error:
         print(error)
     finally:
-        if conn is not None:
-            conn.close()
+        if connection is not None:
+            connection.close()
 
 
-file_xlxl_1 = glob.glob('source_folder\*.xlsx')
-convert_to_postgres(file_xlxl_1[0])
+file_xlsx = glob.glob('source_folder\*.xlsx')
+convert_exel_to_csv(file_xlsx[0])
+
+file_csv = glob.glob('source_folder\*.csv')
+write_to_postgres(file_csv[0])
